@@ -9,14 +9,8 @@ class Settings:
     """
 
     def __init__(self):
-        # Optional: no database is wired up yet, so this must not block startup.
-        self.DATABASE_URL: str | None = self._get_optional("DATABASE_URL")
-
-        # Where cloned/extracted projects are stored temporarily for the pipeline.
-        # Kept inside the project folder so everything stays self-contained.
-        self.TEMP_STORAGE_PATH: str = self._get_optional(
-            "TEMP_STORAGE_PATH", default="./temp/repos"
-        )
+        self.TEMP_STORAGE_PATH: str =  "./temp/repos"
+        self.MAX_UPLOAD_SIZE_MB: int = int("200")
 
     @staticmethod
     def _get_required(key: str) -> str:

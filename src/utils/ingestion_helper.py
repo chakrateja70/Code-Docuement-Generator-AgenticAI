@@ -1,21 +1,12 @@
-"""
-Ingestion helpers for the Git-repo path of the pipeline.
-
-Responsibilities (mechanical, no LLM calls):
-- Sanitize and validate a user-supplied Git URL.
-- Check whether a remote repo is reachable (public) without cloning.
-- Clone a repo (public or private-with-token) into a unique temp folder.
-
-All network/git operations are wrapped in try/except and raise the
-ingestion-specific exceptions defined in src.core.exceptions.
-"""
-
 from __future__ import annotations
 
+import io
 import os
 import re
 import shutil
+import stat
 import uuid
+import zipfile
 from urllib.parse import urlparse, urlunparse, quote
 
 from git import Repo, GitCommandError
@@ -23,10 +14,12 @@ from git import Repo, GitCommandError
 from src.config.settings import settings
 from src.core.exceptions import (
     InvalidGitUrlException,
-    RepoNotFoundException,
     PrivateRepoAuthException,
     RepoCloneException,
+    InvalidZipFileException,
+    ZipExtractionException,
 )
+from src.utils.scanner import NOISE_DIRS, NOISE_FILES
 
 # Hosts we currently support cloning from over HTTPS.
 _ALLOWED_HOSTS = {
@@ -102,51 +95,12 @@ def _build_authed_url(url: str, access_token: str) -> str:
     )
 
 
-def check_repo_accessibility(url: str, access_token: str | None = None) -> str:
-    """
-    Probe a remote repo WITHOUT cloning, using `git ls-remote`.
-
-    Credential prompts are disabled so a private/nonexistent repo fails fast
-    instead of hanging on an interactive prompt.
-
-    Returns "public" or "private" depending on whether a token was needed.
-    Raises:
-      - RepoNotFoundException if the repo can't be reached at all.
-      - PrivateRepoAuthException if a token was supplied but rejected.
-    """
-    probe_url = _build_authed_url(url, access_token) if access_token else url
-
-    # Never prompt interactively; fail immediately on missing credentials.
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "echo",
-    }
-
-    try:
-        Repo().git.ls_remote(probe_url, env=env)
-    except GitCommandError as exc:
-        stderr = (exc.stderr or "").lower()
-        if access_token:
-            # Token was provided but the remote still refused / not found.
-            if "authentication" in stderr or "403" in stderr or "denied" in stderr:
-                raise PrivateRepoAuthException()
-            raise RepoNotFoundException()
-        # No token: could be genuinely missing OR private. Treat as not-found
-        # so the caller (public flow) surfaces a clear message.
-        raise RepoNotFoundException(
-            "Repository not found. If it is private, choose the private option "
-            "and provide an access token."
-        )
-    except Exception:
-        raise RepoNotFoundException()
-
-    return "private" if access_token else "public"
-
-
 def clone_repo(url: str, access_token: str | None = None) -> str:
     """
     Clone a repo into a unique temp subfolder and return its local path.
+
+    - Public repos: pass just the URL.
+    - Private repos: pass an access_token; it's injected into the clone URL.
 
     Uses a shallow clone (depth=1) — the pipeline only needs the current
     file tree, not full history. Cleans up the temp folder on any failure.
@@ -156,6 +110,7 @@ def clone_repo(url: str, access_token: str | None = None) -> str:
 
     clone_url = _build_authed_url(url, access_token) if access_token else url
 
+    # Never prompt interactively; fail fast instead of hanging on a prompt.
     env = {
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
@@ -170,20 +125,132 @@ def clone_repo(url: str, access_token: str | None = None) -> str:
         stderr = (exc.stderr or "").lower()
         if "authentication" in stderr or "403" in stderr or "denied" in stderr:
             raise PrivateRepoAuthException()
-        if "not found" in stderr or "repository" in stderr:
-            raise RepoNotFoundException()
         raise RepoCloneException()
     except Exception:
         _cleanup(dest_dir)
         raise RepoCloneException()
 
+    # Physically remove noise (.git, committed dist/vendor, __pycache__, ...)
+    # so downstream steps walk a clean folder.
+    _prune_noise(dest_dir)
+
     return dest_dir
+
+
+def extract_zip(file_bytes: bytes, filename: str) -> str:
+    """
+    Extract an uploaded zip archive into a unique temp subfolder.
+
+    Mirrors clone_repo: lands the project under TEMP_STORAGE_PATH so the rest
+    of the pipeline is source-agnostic. Returns the extracted root path.
+
+    Safety:
+      - Validates the payload is a real zip.
+      - Guards against Zip Slip (entries with '..' or absolute paths that
+        would escape the destination directory).
+      - Cleans up the temp folder on any failure.
+    """
+    if not filename or not filename.lower().endswith(".zip"):
+        raise InvalidZipFileException("Uploaded file must be a .zip archive.")
+
+    if not file_bytes:
+        raise InvalidZipFileException("Uploaded zip file is empty.")
+
+    buffer = io.BytesIO(file_bytes)
+    if not zipfile.is_zipfile(buffer):
+        raise InvalidZipFileException("Uploaded file is not a valid zip archive.")
+
+    base_dir = settings.TEMP_STORAGE_PATH
+    dest_dir = os.path.join(base_dir, uuid.uuid4().hex)
+    dest_root = os.path.realpath(dest_dir)
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        with zipfile.ZipFile(buffer) as zf:
+            if zf.testzip() is not None:
+                raise InvalidZipFileException("Zip archive is corrupt.")
+
+            safe_members = []
+            for member in zf.namelist():
+                target = os.path.realpath(os.path.join(dest_dir, member))
+                if not (target == dest_root or target.startswith(dest_root + os.sep)):
+                    raise InvalidZipFileException(
+                        "Zip archive contains unsafe file paths."
+                    )
+                # Skip noise (node_modules, .venv, __pycache__, .DS_Store, ...)
+                # so junk never lands on disk in the first place.
+                if _is_noise_member(member):
+                    continue
+                safe_members.append(member)
+
+            zf.extractall(dest_dir, members=safe_members)
+    except InvalidZipFileException:
+        _cleanup(dest_dir)
+        raise
+    except zipfile.BadZipFile:
+        _cleanup(dest_dir)
+        raise InvalidZipFileException("Uploaded file is not a valid zip archive.")
+    except Exception:
+        _cleanup(dest_dir)
+        raise ZipExtractionException()
+
+    return dest_dir
+
+
+def _on_rm_error(func, path, _exc):
+    """
+    rmtree onexc handler: clear the read-only bit and retry.
+
+    Git pack files under .git are read-only on Windows, which makes a plain
+    rmtree fail. Chmod to writable, then re-run the failed operation.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def _is_noise_member(member: str) -> bool:
+    """
+    True if a zip member path is noise — i.e. any path segment is a noise
+    dir, or the filename itself is a noise file.
+    """
+    # Normalize separators; zip always uses "/".
+    parts = member.replace("\\", "/").split("/")
+    for seg in parts[:-1]:
+        if seg in NOISE_DIRS:
+            return True
+    return parts[-1] in NOISE_FILES
+
+
+def _prune_noise(root: str) -> None:
+    """
+    Physically remove noise dirs/files from an already-populated folder.
+
+    Used after git clone (a shallow clone can still contain committed junk
+    like a vendored dist/ or, on Windows, the .git dir itself).
+    """
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        # Remove noise directories and stop descending into them.
+        for d in list(dirnames):
+            if d in NOISE_DIRS:
+                shutil.rmtree(os.path.join(dirpath, d), onexc=_on_rm_error)
+                dirnames.remove(d)
+        for f in filenames:
+            if f in NOISE_FILES:
+                try:
+                    fpath = os.path.join(dirpath, f)
+                    os.chmod(fpath, stat.S_IWRITE)
+                    os.remove(fpath)
+                except OSError:
+                    pass
 
 
 def _cleanup(path: str) -> None:
     """Best-effort removal of a temp folder; never raises."""
     try:
         if os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(path, onexc=_on_rm_error)
     except Exception:
         pass

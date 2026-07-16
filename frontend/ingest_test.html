@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Git Repo Ingest — Test</title>
+  <title>Project Ingest — Test</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -35,6 +35,7 @@
       color: #e2e8f0;
       font-size: 14px;
     }
+    input[type="file"] { padding: 8px; }
     input:focus, select:focus { outline: none; border-color: #3b82f6; }
     .radio-row { display: flex; gap: 20px; margin-top: 6px; }
     .radio-row label {
@@ -42,6 +43,21 @@
       margin: 0; cursor: pointer; font-size: 14px; color: #e2e8f0;
     }
     .radio-row input { width: auto; }
+    /* Top-level source tabs */
+    .tabs { display: flex; gap: 8px; margin-bottom: 8px; }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: #0f172a;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: #94a3b8;
+    }
+    .tab.active { background: #3b82f6; color: white; border-color: #3b82f6; }
     button {
       margin-top: 22px;
       width: 100%;
@@ -94,43 +110,59 @@
 </head>
 <body>
   <div class="card">
-    <h1>Git Repo Ingest</h1>
-    <p class="sub">Test the <code>POST /ingest/git-repo</code> endpoint.</p>
+    <h1>Project Ingest</h1>
+    <p class="sub">Test the ingestion endpoints: clone a Git repo or upload a zip.</p>
 
-    <label>Repository visibility</label>
-    <div class="radio-row">
-      <label><input type="radio" name="visibility" value="public" checked /> Public</label>
-      <label><input type="radio" name="visibility" value="private" /> Private</label>
+    <!-- Top-level source choice -->
+    <div class="tabs">
+      <div class="tab active" data-source="git">Git repo</div>
+      <div class="tab" data-source="zip">Upload zip</div>
     </div>
 
-    <label for="repo-url">Git repository URL</label>
-    <input id="repo-url" type="text" placeholder="https://github.com/owner/repo" />
+    <!-- ============ GIT PANEL ============ -->
+    <div id="git-panel">
+      <label>Repository visibility</label>
+      <div class="radio-row">
+        <label><input type="radio" name="visibility" value="public" checked /> Public</label>
+        <label><input type="radio" name="visibility" value="private" /> Private</label>
+      </div>
 
-    <!-- Shown only when Private is selected -->
-    <div id="private-group">
-      <label>How do you want to authenticate?</label>
-      <div class="auth-methods">
-        <div class="radio-row">
-          <label><input type="radio" name="authMethod" value="pat" /> Personal access token (PAT)</label>
-          <label><input type="radio" name="authMethod" value="browser" /> Sign in with browser</label>
+      <label for="repo-url">Git repository URL</label>
+      <input id="repo-url" type="text" placeholder="https://github.com/owner/repo" />
+
+      <!-- Shown only when Private is selected -->
+      <div id="private-group">
+        <label>How do you want to authenticate?</label>
+        <div class="auth-methods">
+          <div class="radio-row">
+            <label><input type="radio" name="authMethod" value="pat" /> Personal access token (PAT)</label>
+            <label><input type="radio" name="authMethod" value="browser" /> Sign in with browser</label>
+          </div>
+        </div>
+
+        <div id="token-group">
+          <label for="token">Personal access token</label>
+          <input id="token" type="password" placeholder="Paste your PAT (e.g. ghp_…)" />
+          <p class="hint">Token is sent only to your local backend to clone the repo.</p>
+        </div>
+
+        <div id="browser-stub" class="stub">
+          Browser sign-in is not wired up yet. It needs a GitHub OAuth flow on the
+          backend (login redirect + callback + token exchange). For now, use a PAT.
         </div>
       </div>
 
-      <!-- PAT input: shown only when PAT method is chosen -->
-      <div id="token-group">
-        <label for="token">Personal access token</label>
-        <input id="token" type="password" placeholder="Paste your PAT (e.g. ghp_…)" />
-        <p class="hint">Token is sent only to your local backend to clone the repo.</p>
-      </div>
-
-      <!-- Browser sign-in: stubbed for now -->
-      <div id="browser-stub" class="stub">
-        Browser sign-in is not wired up yet. It needs a GitHub OAuth flow on the
-        backend (login redirect + callback + token exchange). For now, use a PAT.
-      </div>
+      <button type="button" id="submit-git">Ingest repository</button>
     </div>
 
-    <button id="submit">Ingest repository</button>
+    <!-- ============ ZIP PANEL ============ -->
+    <div id="zip-panel" class="hidden">
+      <label for="zip-file">Project zip file</label>
+      <input id="zip-file" type="file" accept=".zip" />
+      <p class="hint">Upload a .zip of your project. It will be extracted into the temp folder.</p>
+
+      <button type="button" id="submit-zip">Upload &amp; extract</button>
+    </div>
 
     <pre id="result" class="hidden"></pre>
   </div>
@@ -138,12 +170,28 @@
   <script>
     const API_BASE = "http://localhost:8000";
 
+    const gitPanel = document.getElementById("git-panel");
+    const zipPanel = document.getElementById("zip-panel");
     const privateGroup = document.getElementById("private-group");
     const tokenGroup = document.getElementById("token-group");
     const browserStub = document.getElementById("browser-stub");
     const resultBox = document.getElementById("result");
-    const submitBtn = document.getElementById("submit");
+    const submitGitBtn = document.getElementById("submit-git");
+    const submitZipBtn = document.getElementById("submit-zip");
 
+    // ---- source tabs ----
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+        tab.classList.add("active");
+        const source = tab.dataset.source;
+        gitPanel.classList.toggle("hidden", source !== "git");
+        zipPanel.classList.toggle("hidden", source !== "zip");
+        resultBox.classList.add("hidden");
+      });
+    });
+
+    // ---- git helpers ----
     function getVisibility() {
       return document.querySelector('input[name="visibility"]:checked').value;
     }
@@ -152,13 +200,11 @@
       return el ? el.value : null;
     }
 
-    // Show/hide the private auth block based on visibility.
     document.querySelectorAll('input[name="visibility"]').forEach((radio) => {
       radio.addEventListener("change", () => {
         const isPrivate = getVisibility() === "private";
         privateGroup.style.display = isPrivate ? "block" : "none";
         if (!isPrivate) {
-          // Reset private sub-state when switching back to public.
           tokenGroup.style.display = "none";
           browserStub.style.display = "none";
           document.querySelectorAll('input[name="authMethod"]').forEach(r => r.checked = false);
@@ -166,7 +212,6 @@
       });
     });
 
-    // Show PAT input or browser stub based on chosen auth method.
     document.querySelectorAll('input[name="authMethod"]').forEach((radio) => {
       radio.addEventListener("change", () => {
         const method = getAuthMethod();
@@ -181,7 +226,8 @@
       resultBox.className = ok ? "ok" : "err";
     }
 
-    submitBtn.addEventListener("click", async () => {
+    // ---- git submit ----
+    submitGitBtn.addEventListener("click", async () => {
       const repoUrl = document.getElementById("repo-url").value.trim();
       const visibility = getVisibility();
 
@@ -202,7 +248,6 @@
           show("Browser sign-in is not implemented yet. Please use a Personal access token for now.", false);
           return;
         }
-        // PAT method
         const token = document.getElementById("token").value.trim();
         if (!token) {
           show("Please enter your personal access token.", false);
@@ -211,8 +256,8 @@
         payload.access_token = token;
       }
 
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Cloning…";
+      submitGitBtn.disabled = true;
+      submitGitBtn.textContent = "Cloning…";
       show("Request:\n" + JSON.stringify(payload, null, 2), true);
 
       try {
@@ -226,8 +271,44 @@
       } catch (err) {
         show("Network error: " + err.message + "\n\nIs the server running on " + API_BASE + " ?", false);
       } finally {
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Ingest repository";
+        submitGitBtn.disabled = false;
+        submitGitBtn.textContent = "Ingest repository";
+      }
+    });
+
+    // ---- zip submit ----
+    submitZipBtn.addEventListener("click", async () => {
+      const fileInput = document.getElementById("zip-file");
+      const file = fileInput.files[0];
+
+      if (!file) {
+        show("Please choose a .zip file to upload.", false);
+        return;
+      }
+      if (!file.name.toLowerCase().endsWith(".zip")) {
+        show("Only .zip files are supported.", false);
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", file);
+
+      submitZipBtn.disabled = true;
+      submitZipBtn.textContent = "Uploading…";
+      show(`Uploading: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`, true);
+
+      try {
+        const res = await fetch(`${API_BASE}/ingest/file-upload`, {
+          method: "POST",
+          body: formData, // no Content-Type header — browser sets multipart boundary
+        });
+        const data = await res.json();
+        show(`Status: ${res.status}\n\n` + JSON.stringify(data, null, 2), res.ok);
+      } catch (err) {
+        show("Network error: " + err.message + "\n\nIs the server running on " + API_BASE + " ?", false);
+      } finally {
+        submitZipBtn.disabled = false;
+        submitZipBtn.textContent = "Upload & extract";
       }
     });
   </script>

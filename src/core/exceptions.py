@@ -76,13 +76,6 @@ class InvalidGitUrlException(BadRequestAPIException):
         super().__init__(error_message)
 
 
-class RepoNotFoundException(NotFoundAPIException):
-    """Raised when the remote repository does not exist or is unreachable."""
-
-    def __init__(self, error_message: str = "Repository not found or is not accessible."):
-        super().__init__(error_message)
-
-
 class PrivateRepoAuthException(UnauthorizedAPIException):
     """Raised when a private repo is requested without valid credentials."""
 
@@ -94,4 +87,18 @@ class RepoCloneException(InternalServerAPIException):
     """Raised when cloning the repository fails unexpectedly."""
 
     def __init__(self, error_message: str = "Failed to clone the repository."):
+        super().__init__(error_message)
+
+
+class InvalidZipFileException(BadRequestAPIException):
+    """Raised when the uploaded file is not a valid/usable zip archive."""
+
+    def __init__(self, error_message: str = "Invalid or corrupt zip file."):
+        super().__init__(error_message)
+
+
+class ZipExtractionException(InternalServerAPIException):
+    """Raised when extracting the uploaded zip fails unexpectedly."""
+
+    def __init__(self, error_message: str = "Failed to extract the zip file."):
         super().__init__(error_message)
