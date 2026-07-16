@@ -7,10 +7,18 @@ class Settings:
     """
     A centralized class to hold all application settings loaded from environment variables.
     """
-
     def __init__(self):
-        self.TEMP_STORAGE_PATH: str =  "./temp/repos"
-        self.MAX_UPLOAD_SIZE_MB: int = int("200")
+        # Base folder holding one working directory per job: temp/jobs/{job_id}/
+        self.JOBS_BASE_PATH: str = "./temp/jobs"
+        self.MAX_UPLOAD_SIZE_MB: int = 400
+
+        self.ANTHROPIC_API_KEY: str = self._get_required("ANTHROPIC_API_KEY")
+        self.MODEL_SMALL: str = "claude-haiku-4-5"
+        self.MODEL_MEDIUM: str = "claude-sonnet-5"
+        self.MODEL_LARGE: str = "claude-opus-4-8"
+
+        self.MAX_RETRIES: int = 3
+        self.LLM_TEMPERATURE: float = -1
 
     @staticmethod
     def _get_required(key: str) -> str:

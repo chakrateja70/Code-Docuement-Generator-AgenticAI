@@ -35,6 +35,26 @@ _ALLOWED_HOSTS = {
 _URL_PATTERN = re.compile(r"^https://[\w.-]+/[\w./-]+?(?:\.git)?/?$")
 
 
+def new_job_id() -> str:
+    """Generate a fresh job id used to name this job's working folder."""
+    return uuid.uuid4().hex
+
+
+def get_job_dir(job_id: str) -> str:
+    """Return the working-folder path for a job: temp/jobs/{job_id}/."""
+    return os.path.join(settings.JOBS_BASE_PATH, job_id)
+
+
+def cleanup_job(job_id: str) -> None:
+    """
+    Delete a job's working folder once processing is complete.
+
+    Called after documentation is generated — the raw code is not kept around.
+    Best-effort: never raises, handles read-only files (e.g. leftover .git).
+    """
+    _cleanup(get_job_dir(job_id))
+
+
 def sanitize_git_url(url: str) -> str:
     """
     Trim, validate, and normalize a Git repository URL.
@@ -95,18 +115,17 @@ def _build_authed_url(url: str, access_token: str) -> str:
     )
 
 
-def clone_repo(url: str, access_token: str | None = None) -> str:
+def clone_repo(url: str, job_id: str, access_token: str | None = None) -> str:
     """
-    Clone a repo into a unique temp subfolder and return its local path.
+    Clone a repo into the job's working folder and return its local path.
 
     - Public repos: pass just the URL.
     - Private repos: pass an access_token; it's injected into the clone URL.
 
     Uses a shallow clone (depth=1) — the pipeline only needs the current
-    file tree, not full history. Cleans up the temp folder on any failure.
+    file tree, not full history. Cleans up the job folder on any failure.
     """
-    base_dir = settings.TEMP_STORAGE_PATH
-    dest_dir = os.path.join(base_dir, uuid.uuid4().hex)
+    dest_dir = get_job_dir(job_id)
 
     clone_url = _build_authed_url(url, access_token) if access_token else url
 
@@ -118,7 +137,7 @@ def clone_repo(url: str, access_token: str | None = None) -> str:
     }
 
     try:
-        os.makedirs(base_dir, exist_ok=True)
+        os.makedirs(settings.JOBS_BASE_PATH, exist_ok=True)
         Repo.clone_from(clone_url, dest_dir, depth=1, env=env)
     except GitCommandError as exc:
         _cleanup(dest_dir)
@@ -137,18 +156,18 @@ def clone_repo(url: str, access_token: str | None = None) -> str:
     return dest_dir
 
 
-def extract_zip(file_bytes: bytes, filename: str) -> str:
+def extract_zip(file_bytes: bytes, filename: str, job_id: str) -> str:
     """
-    Extract an uploaded zip archive into a unique temp subfolder.
+    Extract an uploaded zip archive into the job's working folder.
 
-    Mirrors clone_repo: lands the project under TEMP_STORAGE_PATH so the rest
+    Mirrors clone_repo: lands the project under temp/jobs/{job_id}/ so the rest
     of the pipeline is source-agnostic. Returns the extracted root path.
 
     Safety:
       - Validates the payload is a real zip.
       - Guards against Zip Slip (entries with '..' or absolute paths that
         would escape the destination directory).
-      - Cleans up the temp folder on any failure.
+      - Cleans up the job folder on any failure.
     """
     if not filename or not filename.lower().endswith(".zip"):
         raise InvalidZipFileException("Uploaded file must be a .zip archive.")
@@ -160,8 +179,7 @@ def extract_zip(file_bytes: bytes, filename: str) -> str:
     if not zipfile.is_zipfile(buffer):
         raise InvalidZipFileException("Uploaded file is not a valid zip archive.")
 
-    base_dir = settings.TEMP_STORAGE_PATH
-    dest_dir = os.path.join(base_dir, uuid.uuid4().hex)
+    dest_dir = get_job_dir(job_id)
     dest_root = os.path.realpath(dest_dir)
 
     try:

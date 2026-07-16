@@ -10,6 +10,7 @@ from src.utils.ingestion_helper import (
     sanitize_git_url,
     clone_repo,
     extract_zip,
+    new_job_id,
 )
 from src.utils.scanner import build_project_snapshot
 
@@ -41,6 +42,7 @@ class GitRepoRequest(BaseModel):
 class GitRepoResponse(BaseModel):
     """Response returned after a repo is successfully cloned."""
     message: str
+    job_id: str
     visibility: str
     repo_name: str
     clone_path: str
@@ -50,6 +52,7 @@ class GitRepoResponse(BaseModel):
 class FileUploadResponse(BaseModel):
     """Response returned after an uploaded zip is successfully extracted."""
     message: str
+    job_id: str
     project_name: str
     extract_path: str
     project_snapshot: dict
@@ -71,11 +74,14 @@ async def ingest_git_repo(payload: GitRepoRequest) -> GitRepoResponse:
     # Only pass a token when the repo is private.
     token = payload.access_token if payload.visibility == "private" else None
 
+    # Each ingestion gets its own job folder: temp/jobs/{job_id}/.
+    job_id = new_job_id()
+
     # 1. Sanitize / normalize the URL (HttpUrl -> str).
     clean_url = sanitize_git_url(str(payload.repo_url))
 
-    # 2. Clone into temp. A bad token / missing private repo surfaces here.
-    clone_path = clone_repo(clean_url, token)
+    # 2. Clone into the job folder. Bad token / missing repo surfaces here.
+    clone_path = clone_repo(clean_url, job_id, token)
 
     # 3. Scan the cloned folder into a structured project_snapshot.
     project_snapshot = build_project_snapshot(clone_path)
@@ -84,6 +90,7 @@ async def ingest_git_repo(payload: GitRepoRequest) -> GitRepoResponse:
 
     return GitRepoResponse(
         message="Repository cloned successfully.",
+        job_id=job_id,
         visibility=payload.visibility,
         repo_name=repo_name,
         clone_path=clone_path,
@@ -116,7 +123,9 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
             f"Zip file exceeds the {settings.MAX_UPLOAD_SIZE_MB}MB limit."
         )
 
-    extract_path = extract_zip(contents, file.filename)
+    # Each ingestion gets its own job folder: temp/jobs/{job_id}/.
+    job_id = new_job_id()
+    extract_path = extract_zip(contents, file.filename, job_id)
 
     # Scan the extracted folder into a structured project_snapshot.
     project_snapshot = build_project_snapshot(extract_path)
@@ -126,6 +135,7 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
 
     return FileUploadResponse(
         message="Zip file uploaded and extracted successfully.",
+        job_id=job_id,
         project_name=project_name,
         extract_path=extract_path,
         project_snapshot=project_snapshot,
