@@ -13,4 +13,6 @@ dependencies = [
     "python-multipart>=0.0.9",
     "langchain-anthropic>=1.4.8",
     "langchain-core>=1.4.9",
+    "langgraph>=1.2.9",
+    "langsmith>=0.10.5",
 ]
